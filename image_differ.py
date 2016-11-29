@@ -8,8 +8,8 @@ from math import floor
 import io
 from itertools import izip
 from os import environ
-import signal
 import threading
+import atexit
 
 from flask import Flask
 from flask import render_template
@@ -29,7 +29,7 @@ last_image_difference = -1
 
 # handlers
 shutdown_requested = False
-diff_thread = threading.Thread()
+diff_thread = None
 
 # Retrieve configuration from environment
 def environment_variables():
@@ -66,30 +66,6 @@ def shutdown_server():
         t = diff_thread
         diff_thread = None
         t.join()
-
-@app.route('/config')
-def config():
-    output = json.dumps(environment_variables(), indent=4) + '\n'
-    return Response(output, mimetype='text/plain')
-
-@app.route('/shutdown')
-def shutdown():
-    shutdown_server()
-    return Response('ok\n', mimetype='text/plain')
-
-@app.route('/stats')
-def stats():
-    output = 'total images: {}\n' \
-             'last image difference: {}\n' \
-             'largest different: {}\n'.format(total_images_processed,
-                                              last_image_difference,
-                                              largest_image_difference)
-    return Response(output, mimetype='text/plain')
-
-@app.route('/')
-def index():
-    return render_template('index.html',
-                           powered_by=environ.get('POWERED_BY', 'Deis'))
 
 def diff_images(image1_bytes, image2_bytes):
     image1 = Image.open(io.BytesIO(image1_bytes))
@@ -162,24 +138,53 @@ def image_difference_loop():
                 blobs = None
         time.sleep(0.5)
 
-def sigterm_handler():
-    shutdown = True
-    if diff_thread:
-        diff_thread.join()
+def create_app():
+    @app.route('/config')
+    def config():
+        output = json.dumps(environment_variables(), indent=4) + '\n'
+        return Response(output, mimetype='text/plain')
 
-def create_app
-              
+    @app.route('/shutdown')
+    def shutdown():
+        shutdown_server()
+        return Response('ok\n', mimetype='text/plain')
+
+    @app.route('/stats')
+    def stats():
+        output = 'total images: {}\n' \
+                'last image difference: {}\n' \
+                'largest different: {}\n'.format(total_images_processed,
+                                                last_image_difference,
+                                                largest_image_difference)
+        return Response(output, mimetype='text/plain')
+
+    @app.route('/')
+    def index():
+        return render_template('index.html',
+                            powered_by=environ.get('POWERED_BY', 'Deis'))
+
+    def interrupt():
+        global diff_thread
+        global shutdown_requested
+        if diff_thread:
+            shutdown_requested = True
+            diff_thread.join()
+            diff_thread = None
+
+    def start_differ():
+        global diff_thread
+        diff_thread = threading.Thread(target=image_difference_loop)
+        diff_thread.start()
+
+    start_differ()
+    atexit.register(interrupt)
+    
+    return app
+
+
 if __name__ == '__main__':
-    # start the diff thread
-    print "create thread"
-    diff_thread = threading.Thread(target=image_difference_loop)
-    print "start thread"
-    diff_thread.start()
-    
-    print "hello\n"
-    # SIGTERM handler
-    signal.signal(signal.SIGTERM, sigterm_handler)
-    
+    app = create_app()
+
     # Bind to PORT if defined, otherwise default to 5000.
     port = int(environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
