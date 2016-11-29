@@ -84,14 +84,14 @@ def diff_images(image1_bytes, image2_bytes):
     if image1.size != image2.size:
         # different sizes
         return -1
-    
+
     pairs = izip(image1.getdata(), image2.getdata())
     if len(image1.getbands()) == 1:
         # for gray-scale jpegs
-        dif = sum(abs(p1-p2) for p1,p2 in pairs)
+        dif = sum(abs(p1-p2) for p1, p2 in pairs)
     else:
-        dif = sum(abs(c1-c2) for p1,p2 in pairs for c1,c2 in zip(p1,p2))
-    
+        dif = sum(abs(c1-c2) for p1, p2 in pairs for c1, c2 in zip(p1, p2))
+
     ncomponents = image1.size[0] * image1.size[1] * 3
     difference = (dif / 255.0 * 100) / ncomponents
 
@@ -160,13 +160,12 @@ def image_scrubber_loop():
                 last_check = now
                 preserve_range = int(floor(now / 1000))
                 preserve_prefix = '{}'.format(preserve_range)
-                blobs = list(blob_service.list_blobs(env['storageAccountContainer']));
-                                                     
+                blobs = list(blob_service.list_blobs(env['storageAccountContainer']))
+
                 for blob in blobs:
                     if not blob.name.startswith(preserve_prefix):
                         blob_service.delete_blob(env['storageAccountContainer'], blob.name)
         time.sleep(1)
-
 
 def create_app():
     @app.route('/config')
@@ -217,7 +216,7 @@ def create_app():
 
     start_differ()
     atexit.register(interrupt)
-    
+
     return app
 
 
