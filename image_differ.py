@@ -123,21 +123,22 @@ def image_difference_loop():
                                                      prefix=blob_filter))
                 blob_count = len(blobs)
 
-                current_blob_name = blobs[blob_count-1].name
-                prior_blob_name = blobs[blob_count-2].name
-                current_blob = blob_service.get_blob_to_bytes(env['storageAccountContainer'],
-                                                              current_blob_name)
-                prior_blob = blob_service.get_blob_to_bytes(env['storageAccountContainer'],
-                                                            prior_blob_name)
+                if blob_count > 2:
+                    current_blob_name = blobs[blob_count-1].name
+                    prior_blob_name = blobs[blob_count-2].name
+                    current_blob = blob_service.get_blob_to_bytes(env['storageAccountContainer'],
+                                                                current_blob_name)
+                    prior_blob = blob_service.get_blob_to_bytes(env['storageAccountContainer'],
+                                                                prior_blob_name)
 
-                last_image_difference = diff_images(current_blob.content, prior_blob.content)
-                if last_image_difference > largest_image_difference:
-                    largest_image_difference = last_image_difference
-                total_images_processed = total_images_processed + 1
+                    last_image_difference = diff_images(current_blob.content, prior_blob.content)
+                    if last_image_difference > largest_image_difference:
+                        largest_image_difference = last_image_difference
+                    total_images_processed = total_images_processed + 1
 
-                current_blob = None
-                prior_blob = None
-                blobs = None
+                    current_blob = None
+                    prior_blob = None
+                    blobs = None
         time.sleep(0.5)
 
 def image_scrubber_loop():
