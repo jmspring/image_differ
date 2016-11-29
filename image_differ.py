@@ -30,6 +30,7 @@ last_image_difference = -1
 # handlers
 shutdown_requested = False
 diff_thread = None
+scrubber_thread = None
 
 # Retrieve configuration from environment
 def environment_variables():
@@ -38,7 +39,8 @@ def environment_variables():
         'storageAccountKey': environ.get('AZURE_STORAGE_ACCOUNT_KEY', None),
         'storageAccountContainer': environ.get('AZURE_STORAGE_ACCOUNT_CONTAINER_NAME', None),
         'alertThreshold': environ.get('IMAGE_DIFFERENCE_ALERT_THRESHOLD', 10),
-        'checkInterval':  environ.get('IMAGE_CHECK_INTERVAL', 10)
+        'checkInterval':  environ.get('IMAGE_CHECK_INTERVAL', 10),
+        'scrubInterval': environ.get('IMAGE_SCRUB_INTERVAL', 600)
     }
     return env
 
@@ -51,6 +53,7 @@ def required_environment_vars_set(env):
 
 def shutdown_server():
     global diff_thread
+    global scrubber_thread
     global shutdown_requested
 
     shutdown_requested = True
@@ -65,6 +68,10 @@ def shutdown_server():
     if diff_thread:
         t = diff_thread
         diff_thread = None
+        t.join()
+    if scrubber_thread:
+        t = scrubber_thread
+        scrubber_thread = None
         t.join()
 
 def diff_images(image1_bytes, image2_bytes):
@@ -98,21 +105,16 @@ def image_difference_loop():
 
     blob_service = None
 
-    print "running"
     last_check = 0
     env = {}
     while not shutdown_requested:
-        print "main loop"
         if not blob_service:
-            print "no blob service"
             env = environment_variables()
             if required_environment_vars_set(env):
-                print "getting blob service"
                 blob_service = BlockBlobService(account_name=env['storageAccount'],
                                                 account_key=env['storageAccountKey'])
                 continue
         else:
-            print "check now"
             now = int(floor(time.time()))
             if now - last_check > env['checkInterval']:
                 last_check = now
@@ -137,6 +139,34 @@ def image_difference_loop():
                 prior_blob = None
                 blobs = None
         time.sleep(0.5)
+
+def image_scrubber_loop():
+    global shutdown_requested
+
+    blob_service = None
+
+    last_check = 0
+    env = {}
+    while not shutdown_requested:
+        if not blob_service:
+            env = environment_variables()
+            if required_environment_vars_set(env):
+                blob_service = BlockBlobService(account_name=env['storageAccount'],
+                                                account_key=env['storageAccountKey'])
+                continue
+        else:
+            now = int(floor(time.time()))
+            if now - last_check > env['scrubInterval']:
+                last_check = now
+                preserve_range = int(floor(now / 1000))
+                preserve_prefix = '{}'.format(preserve_range)
+                blobs = list(blob_service.list_blobs(env['storageAccountContainer']));
+                                                     
+                for blob in blobs:
+                    if not blob.name.startswith(preserve_prefix):
+                        blob_service.delete_blob(env['storageAccountContainer'], blob.name)
+        time.sleep(1)
+
 
 def create_app():
     @app.route('/config')
@@ -165,16 +195,25 @@ def create_app():
 
     def interrupt():
         global diff_thread
+        global scrubber_thread
         global shutdown_requested
+
+        shutdown_requested = True
+
         if diff_thread:
-            shutdown_requested = True
             diff_thread.join()
             diff_thread = None
+        if scrubber_thread:
+            scrubber_thread.join()
+            scrubber_thread = None
 
     def start_differ():
+        global scrubber_thread
         global diff_thread
         diff_thread = threading.Thread(target=image_difference_loop)
         diff_thread.start()
+        scrubber_thread = threading.Thread(target=image_scrubber_loop)
+        scrubber_thread.start()
 
     start_differ()
     atexit.register(interrupt)
