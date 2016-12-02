@@ -16,7 +16,11 @@ from flask import render_template
 from flask import Response
 from flask import request
 
+from azure.common import AzureMissingResourceHttpError
 from azure.storage.blob import BlockBlobService
+from azure.servicebus import (
+    ServiceBusService,
+)
 
 from PIL import Image
 
@@ -30,7 +34,6 @@ last_image_difference = -1
 # handlers
 shutdown_requested = False
 diff_thread = None
-scrubber_thread = None
 
 # Retrieve configuration from environment
 def environment_variables():
@@ -39,21 +42,27 @@ def environment_variables():
         'storageAccountKey': environ.get('AZURE_STORAGE_ACCOUNT_KEY', None),
         'storageAccountContainer': environ.get('AZURE_STORAGE_ACCOUNT_CONTAINER_NAME', None),
         'alertThreshold': environ.get('IMAGE_DIFFERENCE_ALERT_THRESHOLD', 10),
-        'checkInterval':  environ.get('IMAGE_CHECK_INTERVAL', 10),
-        'scrubInterval': environ.get('IMAGE_SCRUB_INTERVAL', 600)
+        'checkInterval': environ.get('IMAGE_CHECK_INTERVAL', 10),
+        'serviceBusNamespace': environ.get('AZURE_SERVICE_BUS_NAMESPACE'),
+        'serviceBusQueue': environ.get('AZURE_SERVICE_BUS_QUEUE'),
+        'serviceBusSharedAccessName': environ.get('AZURE_SERVICE_BUS_SHARED_ACCESS_NAME'),
+        'serviceBusSharedAccessKey': environ.get('AZURE_SERVICE_BUS_SHARED_ACCESS_KEY')       
     }
     return env
 
 def required_environment_vars_set(env):
     if env['storageAccount'] != None and \
             env['storageAccountKey'] != None and \
-            env['storageAccountContainer'] != None:
+            env['storageAccountContainer'] != None and \
+            env['serviceBusNamespace'] != None and \
+            env['serviceBusQueue'] != None and \
+            env['serviceBusSharedAccessName'] != None and \
+            env['serviceBusSharedAccessKey'] != None:
         return True
     return False
 
 def shutdown_server():
     global diff_thread
-    global scrubber_thread
     global shutdown_requested
 
     shutdown_requested = True
@@ -68,10 +77,6 @@ def shutdown_server():
     if diff_thread:
         t = diff_thread
         diff_thread = None
-        t.join()
-    if scrubber_thread:
-        t = scrubber_thread
-        scrubber_thread = None
         t.join()
 
 def diff_images(image1_bytes, image2_bytes):
@@ -104,69 +109,56 @@ def image_difference_loop():
     global largest_image_difference
 
     blob_service = None
+    sbus_service = None
 
     last_check = 0
     env = {}
     while not shutdown_requested:
+        processed_packet = False
         if not blob_service:
             env = environment_variables()
             if required_environment_vars_set(env):
                 blob_service = BlockBlobService(account_name=env['storageAccount'],
                                                 account_key=env['storageAccountKey'])
+                sbus_service = ServiceBusService(env['serviceBusNamespace'],
+                                                 shared_access_key_name=env['serviceBusSharedAccessName'],
+                                                 shared_access_key_value=env['serviceBusSharedAccessKey'])
                 continue
         else:
-            now = int(floor(time.time()))
-            if now - last_check > env['checkInterval']:
-                last_check = now
-                blob_filter = '{}'.format(now)[0:-3]
-                blobs = list(blob_service.list_blobs(env['storageAccountContainer'],
-                                                     prefix=blob_filter))
-                blob_count = len(blobs)
+            message = sbus_service.receive_queue_message(env['serviceBusQueue'], False, 0.25)
+            if message.body != None:
+                packet = json.loads(message.body)
+                current_blob_name = packet['current_image']
+                prior_blob_name = packet['prior_image']
+                capture_time = packet['timestamp']
+                current_blob = None
+                prior_blob = None
 
-                if blob_count > 2:
-                    current_blob_name = blobs[blob_count-1].name
-                    prior_blob_name = blobs[blob_count-2].name
+                # Retrieve the blobs, skip the packet if either one missing
+                try:
                     current_blob = blob_service.get_blob_to_bytes(env['storageAccountContainer'],
                                                                 current_blob_name)
                     prior_blob = blob_service.get_blob_to_bytes(env['storageAccountContainer'],
                                                                 prior_blob_name)
+                except AzureMissingResourceHttpError:
+                    continue
 
-                    last_image_difference = diff_images(current_blob.content, prior_blob.content)
-                    if last_image_difference > largest_image_difference:
-                        largest_image_difference = last_image_difference
-                    total_images_processed = total_images_processed + 1
+                last_image_difference = diff_images(current_blob.content, prior_blob.content)
+                if last_image_difference > largest_image_difference:
+                    largest_image_difference = last_image_difference
+                total_images_processed = total_images_processed + 1
 
-                    current_blob = None
-                    prior_blob = None
-                    blobs = None
-        time.sleep(0.5)
-
-def image_scrubber_loop():
-    global shutdown_requested
-
-    blob_service = None
-
-    last_check = 0
-    env = {}
-    while not shutdown_requested:
-        if not blob_service:
-            env = environment_variables()
-            if required_environment_vars_set(env):
-                blob_service = BlockBlobService(account_name=env['storageAccount'],
-                                                account_key=env['storageAccountKey'])
-                continue
-        else:
-            now = int(floor(time.time()))
-            if now - last_check > env['scrubInterval']:
-                last_check = now
-                preserve_range = int(floor(now / 1000))
-                preserve_prefix = '{}'.format(preserve_range)
-                blobs = list(blob_service.list_blobs(env['storageAccountContainer']))
-
-                for blob in blobs:
-                    if not blob.name.startswith(preserve_prefix):
-                        blob_service.delete_blob(env['storageAccountContainer'], blob.name)
-        time.sleep(1)
+                processed_packet = True
+                # clean up
+                current_blob = None
+                prior_blob = None
+                try:
+                    blob_service.delete_blob(env['storageAccountContainer'],
+                                             prior_blob_name)
+                except AzureMissingResourceHttpError:
+                    continue
+        if not processed_packet:
+            time.sleep(0.5)
 
 def create_app():
     @app.route('/config')
@@ -195,7 +187,6 @@ def create_app():
 
     def interrupt():
         global diff_thread
-        global scrubber_thread
         global shutdown_requested
 
         shutdown_requested = True
@@ -203,17 +194,11 @@ def create_app():
         if diff_thread:
             diff_thread.join()
             diff_thread = None
-        if scrubber_thread:
-            scrubber_thread.join()
-            scrubber_thread = None
 
     def start_differ():
-        global scrubber_thread
         global diff_thread
         diff_thread = threading.Thread(target=image_difference_loop)
         diff_thread.start()
-        scrubber_thread = threading.Thread(target=image_scrubber_loop)
-        scrubber_thread.start()
 
     start_differ()
     atexit.register(interrupt)
@@ -227,4 +212,3 @@ if __name__ == '__main__':
     # Bind to PORT if defined, otherwise default to 5000.
     port = int(environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
-    
