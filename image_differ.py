@@ -1,5 +1,6 @@
 """
-Example python app with the Flask framework: http://flask.pocoo.org/
+Given a message in a queue, calculates the diff of two images.  If
+the difference is large enough, issue a notification.
 """
 
 import json
@@ -20,6 +21,7 @@ from azure.common import AzureMissingResourceHttpError
 from azure.storage.blob import BlockBlobService
 from azure.servicebus import (
     ServiceBusService,
+    Message,
 )
 
 from PIL import Image
@@ -41,12 +43,17 @@ def environment_variables():
         'storageAccount': environ.get('AZURE_STORAGE_ACCOUNT_NAME', None),
         'storageAccountKey': environ.get('AZURE_STORAGE_ACCOUNT_KEY', None),
         'storageAccountContainer': environ.get('AZURE_STORAGE_ACCOUNT_CONTAINER_NAME', None),
-        'alertThreshold': environ.get('IMAGE_DIFFERENCE_ALERT_THRESHOLD', 10),
+        'alertThreshold': environ.get('IMAGE_DIFFERENCE_ALERT_THRESHOLD', 5),
         'checkInterval': environ.get('IMAGE_CHECK_INTERVAL', 10),
-        'serviceBusNamespace': environ.get('AZURE_SERVICE_BUS_NAMESPACE'),
-        'serviceBusQueue': environ.get('AZURE_SERVICE_BUS_QUEUE'),
-        'serviceBusSharedAccessName': environ.get('AZURE_SERVICE_BUS_SHARED_ACCESS_NAME'),
-        'serviceBusSharedAccessKey': environ.get('AZURE_SERVICE_BUS_SHARED_ACCESS_KEY')       
+        'serviceBusNamespace': environ.get('AZURE_SERVICE_BUS_NAMESPACE', None),
+        'serviceBusImageQueue': environ.get('AZURE_SERVICE_BUS_IMAGE_QUEUE', None),
+        'serviceBusNotificationQueue': environ.get('AZURE_SERVICE_BUS_NOTIFICATION_QUEUE', None),
+        'serviceBusSharedAccessName': environ.get('AZURE_SERVICE_BUS_SHARED_ACCESS_NAME', None),
+        'serviceBusSharedAccessKey': environ.get('AZURE_SERVICE_BUS_SHARED_ACCESS_KEY', None),
+        'eventHubNamespace': environ.get('AZURE_EVENT_HUB_NAMESPACE', None),
+        'eventHubName': environ.get('AZURE_EVENT_HUB_NAME', None),
+        'eventHubSharedAccessName': environ.get('AZURE_EVENT_HUB_SHARED_ACCESS_NAME', None),
+        'eventHubSharedAccessKey': environ.get('AZURE_EVENT_HUB_SHARED_ACCESS_KEY', None),
     }
     return env
 
@@ -55,9 +62,14 @@ def required_environment_vars_set(env):
             env['storageAccountKey'] != None and \
             env['storageAccountContainer'] != None and \
             env['serviceBusNamespace'] != None and \
-            env['serviceBusQueue'] != None and \
+            env['serviceBusImageQueue'] != None and \
+            env['serviceBusNotificationQueue'] != None and \
             env['serviceBusSharedAccessName'] != None and \
-            env['serviceBusSharedAccessKey'] != None:
+            env['serviceBusSharedAccessKey'] != None and \
+            env['eventHubNamespace'] != None and \
+            env['eventHubName'] != None and \
+            env['eventHubSharedAccessName'] != None and \
+            env['eventHubSharedAccessKey'] != None:
         return True
     return False
 
@@ -102,6 +114,41 @@ def diff_images(image1_bytes, image2_bytes):
 
     return difference
 
+def sbus_send_message(namespace, access_name, access_key, entity, body, is_event_hub=False):
+    sbus_service = ServiceBusService(namespace,
+                                     shared_access_key_name=access_name,
+                                     shared_access_key_value=access_key)
+    message = Message(body)
+    if not is_event_hub:
+        sbus_service.send_queue_message(entity, message)
+    else:
+        sbus_service.send_event(entity, message)
+
+def sbus_recv_message(namespace, access_name, access_key, entity, timeout=10):
+    sbus_service = ServiceBusService(namespace,
+                                     shared_access_key_name=access_name,
+                                     shared_access_key_value=access_key)
+    message = sbus_service.receive_queue_message(entity, False, timeout)
+    if message.body == None:
+        return None
+    return message.body
+
+def blob_retrieve_blob_bytes(account, key, container, name):
+    blob_service = BlockBlobService(account_name=account, account_key=key)
+    try:
+        blob = blob_service.get_blob_to_bytes(container, name)
+    except AzureMissingResourceHttpError:
+        blob = None
+    return blob               
+
+def blob_delete_blob(account, key, container, name):
+    blob_service = BlockBlobService(account_name=account, account_key=key)
+    try:
+        blob_service.delete_blob(container, name)
+    except AzureMissingResourceHttpError:
+        # TODO - log something
+        return
+
 def image_difference_loop():
     global shutdown_requested
     global last_image_difference
@@ -113,21 +160,24 @@ def image_difference_loop():
 
     last_check = 0
     env = {}
+    environment_ready = False
     while not shutdown_requested:
         processed_packet = False
-        if not blob_service:
+        
+        if not environment_ready:
             env = environment_variables()
             if required_environment_vars_set(env):
-                blob_service = BlockBlobService(account_name=env['storageAccount'],
-                                                account_key=env['storageAccountKey'])
-                sbus_service = ServiceBusService(env['serviceBusNamespace'],
-                                                 shared_access_key_name=env['serviceBusSharedAccessName'],
-                                                 shared_access_key_value=env['serviceBusSharedAccessKey'])
+                environment_ready = True
                 continue
         else:
-            message = sbus_service.receive_queue_message(env['serviceBusQueue'], False, 0.25)
-            if message.body != None:
-                packet = json.loads(message.body)
+            message = sbus_recv_message(env['serviceBusNamespace'],
+                                        env['serviceBusSharedAccessName'],
+                                        env['serviceBusSharedAccessKey'],
+                                        env['serviceBusImageQueue'],
+                                        5)
+            
+            if message != None:
+                packet = json.loads(message)
                 current_blob_name = packet['current_image']
                 prior_blob_name = packet['prior_image']
                 capture_time = packet['timestamp']
@@ -135,28 +185,53 @@ def image_difference_loop():
                 prior_blob = None
 
                 # Retrieve the blobs, skip the packet if either one missing
-                try:
-                    current_blob = blob_service.get_blob_to_bytes(env['storageAccountContainer'],
-                                                                current_blob_name)
-                    prior_blob = blob_service.get_blob_to_bytes(env['storageAccountContainer'],
-                                                                prior_blob_name)
-                except AzureMissingResourceHttpError:
-                    continue
+                current_blob = blob_retrieve_blob_bytes(env['storageAccount'],
+                                                        env['storageAccountKey'],
+                                                        env['storageAccountContainer'],
+                                                        current_blob_name)
+                prior_blob = blob_retrieve_blob_bytes(env['storageAccount'],
+                                                      env['storageAccountKey'],
+                                                      env['storageAccountContainer'],
+                                                      prior_blob_name)
+                if prior_blob:
+                    # do some clean up
+                    blob_delete_blob(env['storageAccount'],
+                                     env['storageAccountKey'],
+                                     env['storageAccountContainer'],
+                                     current_blob_name)
+                if not current_blob or not prior_blob:
+                    continue;
 
+                # determine the difference
                 last_image_difference = diff_images(current_blob.content, prior_blob.content)
                 if last_image_difference > largest_image_difference:
                     largest_image_difference = last_image_difference
                 total_images_processed = total_images_processed + 1
 
+                packet = {
+                    'timestamp': capture_time,
+                    'difference': last_image_difference
+                }
+                if last_image_difference > env['alertThreshold']:
+                    # send a message to the notifier to alert about the difference detected
+                    sbus_send_message(env['serviceBusNamespace'],
+                                      env['serviceBusSharedAccessName'],
+                                      env['serviceBusSharedAccessKey'],
+                                      env['serviceBusNotificationQueue'],
+                                      json.dumps(packet))
+
+                # send difference to eventhub for analysis and processing
+                sbus_send_message(env['eventHubNamespace'],
+                                  env['eventHubSharedAccessName'],
+                                  env['eventHubSharedAccessKey'],
+                                  env['eventHubName'],
+                                  json.dumps(packet),
+                                  True)
+
                 processed_packet = True
                 # clean up
                 current_blob = None
                 prior_blob = None
-                try:
-                    blob_service.delete_blob(env['storageAccountContainer'],
-                                             prior_blob_name)
-                except AzureMissingResourceHttpError:
-                    continue
         if not processed_packet:
             time.sleep(0.5)
 
