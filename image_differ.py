@@ -104,8 +104,7 @@ def environment_variables():
         'storageAccount': environ.get('AZURE_STORAGE_ACCOUNT_NAME', None),
         'storageAccountKey': environ.get('AZURE_STORAGE_ACCOUNT_KEY', None),
         'storageAccountContainer': environ.get('AZURE_STORAGE_ACCOUNT_CONTAINER_NAME', None),
-        'alertThreshold': environ.get('IMAGE_DIFFERENCE_ALERT_THRESHOLD', 5),
-        'checkInterval': environ.get('IMAGE_CHECK_INTERVAL', 10),
+        'alertThreshold': float(environ.get('IMAGE_DIFFERENCE_ALERT_THRESHOLD', 5)),
         'serviceBusNamespace': environ.get('AZURE_SERVICE_BUS_NAMESPACE', None),
         'serviceBusImageQueue': environ.get('AZURE_SERVICE_BUS_IMAGE_QUEUE', None),
         'serviceBusNotificationQueue': environ.get('AZURE_SERVICE_BUS_NOTIFICATION_QUEUE', None),
@@ -350,6 +349,7 @@ def image_difference_loop(messageQueue):
                         'timestamp': capture_time,
                         'difference': difference
                     }
+                    print 'Difference for alert: {} : {}'.format(difference, env['alertThreshold'])
                     if difference > env['alertThreshold']:
                         # send a message to the notifier to alert about the difference detected
                         sbus_send_message(env['serviceBusNamespace'],
