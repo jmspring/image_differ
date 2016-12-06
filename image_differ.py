@@ -134,6 +134,12 @@ def required_environment_vars_set(env):
         return True
     return False
 
+def mask_sensitive_environment_variables(env):
+    for key in env.keys():
+        if 'KEY' in key.upper():
+            env[key] = '********'
+    return env
+
 def shutdown_server():
     global diff_thread
     global shutdown_requested
@@ -383,7 +389,8 @@ def image_difference_loop(messageQueue):
 def create_app():
     @app.route('/config')
     def config():
-        output = json.dumps(environment_variables(), indent=4) + '\n'
+        masked_env = mask_sensitive_environment_variables(environment_variables())
+        output = json.dumps(masked_env, indent=4) + '\n'
         return Response(output, mimetype='text/plain')
 
     @app.route('/shutdown')
