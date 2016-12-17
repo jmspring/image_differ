@@ -26,8 +26,6 @@ from azure.servicebus import (
 
 from PIL import Image
 
-app = Flask(__name__)
-
 # stats
 stats = {
     'processing': {
@@ -222,7 +220,7 @@ def blob_retrieve_blob_bytes(account, key, container, name):
     except AzureMissingResourceHttpError as e:
         blob = None
         error = str(e)
-    except Exception as ex:        
+    except Exception as ex:
         blob = None
         error = str(e)
     stats_update_image_store('read', name, error)
@@ -240,8 +238,8 @@ def blob_delete_blob(account, key, container, name):
     stats_update_image_store('delete', name, error)
 
 class ProcessQueueMessages:
-    messages = None;
-    messageLock = None;
+    messages = None
+    messageLock = None
 
     def __init__(self):
         self.messages = {}
@@ -277,10 +275,10 @@ def process_message_loop(messageQueue):
                 time.sleep(0.5)
         else:
             message = sbus_recv_message(env['serviceBusNamespace'],
-                                            env['serviceBusSharedAccessName'],
-                                            env['serviceBusSharedAccessKey'],
-                                            env['serviceBusImageQueue'],
-                                            5)
+                                        env['serviceBusSharedAccessName'],
+                                        env['serviceBusSharedAccessKey'],
+                                        env['serviceBusImageQueue'],
+                                        5)
             packet = None
             if message:
                 try:
@@ -298,7 +296,6 @@ def image_difference_loop(messageQueue):
     blob_service = None
     sbus_service = None
 
-    last_check = 0
     env = {}
     environment_ready = False
     while not shutdown_requested:
@@ -319,22 +316,24 @@ def image_difference_loop(messageQueue):
                 current_blob = None
                 prior_blob = None
 
-                print 'Current: {}, Prior: {}, Timestamp: {}'.format(current_blob_name, prior_blob_name, capture_time)
-            
+                print 'Current: {}, Prior: {}, Timestamp: {}'.format(current_blob_name,
+                                                                     prior_blob_name,
+                                                                     capture_time)
+
                 # Retrieve the blobs, skip the packet if either one missing
                 start = time.time()
                 current_blob = blob_retrieve_blob_bytes(env['storageAccount'],
                                                         env['storageAccountKey'],
                                                         env['storageAccountContainer'],
                                                         current_blob_name)
-                end = time.time();
+                end = time.time()
                 print 'Load current: {}'.format(end - start)
                 start = end
                 prior_blob = blob_retrieve_blob_bytes(env['storageAccount'],
                                                       env['storageAccountKey'],
                                                       env['storageAccountContainer'],
                                                       prior_blob_name)
-                end = time.time();
+                end = time.time()
                 print 'Load prior: {}'.format(end - start)
 
                 if current_blob and prior_blob:
@@ -353,19 +352,19 @@ def image_difference_loop(messageQueue):
                     if difference > env['alertThreshold']:
                         # send a message to the notifier to alert about the difference detected
                         sbus_send_message(env['serviceBusNamespace'],
-                                        env['serviceBusSharedAccessName'],
-                                        env['serviceBusSharedAccessKey'],
-                                        env['serviceBusNotificationQueue'],
-                                        json.dumps(packet))
+                                          env['serviceBusSharedAccessName'],
+                                          env['serviceBusSharedAccessKey'],
+                                          env['serviceBusNotificationQueue'],
+                                          json.dumps(packet))
 
                     # send difference to eventhub for analysis and processing
                     start = time.time()
                     sbus_send_message(env['eventHubNamespace'],
-                                    env['eventHubSharedAccessName'],
-                                    env['eventHubSharedAccessKey'],
-                                    env['eventHubName'],
-                                    json.dumps(packet),
-                                    True)
+                                      env['eventHubSharedAccessName'],
+                                      env['eventHubSharedAccessKey'],
+                                      env['eventHubName'],
+                                      json.dumps(packet),
+                                      True)
                     end = time.time()
                     print 'Send event: {}'.format(end-start)
 
@@ -387,6 +386,8 @@ def image_difference_loop(messageQueue):
             time.sleep(1)
 
 def create_app():
+    app = Flask(__name__)
+
     @app.route('/config')
     def config():
         masked_env = mask_sensitive_environment_variables(environment_variables())
@@ -407,7 +408,7 @@ def create_app():
     @app.route('/')
     def index():
         return render_template('index.html',
-                            powered_by=environ.get('POWERED_BY', 'Deis'))
+                               powered_by=environ.get('POWERED_BY', 'Deis'))
 
     def interrupt():
         global diff_thread
